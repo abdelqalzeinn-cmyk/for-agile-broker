@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -52,7 +53,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Missing code query parameter"})
                 return
 
-            code = code_list[0]
+            code = code_list[0].upper()
             now = time.time()
             with lock:
                 if code not in STORE:
@@ -61,7 +62,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
                 entry = STORE[code]
                 if now > entry["expires"]:
-                    # expired
                     del STORE[code]
                     self._send_json(410, {"found": True, "expired": True})
                     return
@@ -75,7 +75,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        # Read body
         length = int(self.headers.get("Content-Length", 0))
         body = b""
         if length > 0:
@@ -91,7 +90,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
             code = data.get("code")
             token = data.get("token")
 
-            # Validate code (8 chars, A-Z0-9)
             if not isinstance(code, str) or not re.match(r"^[A-Z0-9]{8}$", code):
                 self._send_json(400, {"error": "Invalid code. Must be 8 characters of A-Z0-9"})
                 return
@@ -100,14 +98,13 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Token cannot be empty"})
                 return
 
-            # Never log token value, only code
             print(f"[broker] Storing code: {code}", flush=True)
 
             now = time.time()
             with lock:
                 STORE[code] = {
                     "token": token,
-                    "expires": now + TTL
+                    "expires": now + TTL,
                 }
 
             self._send_json(200, {"ok": True, "ttl": TTL})
@@ -118,6 +115,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if not isinstance(code, str) or not code:
                 self._send_json(400, {"error": "Missing or invalid code"})
                 return
+            code = code.upper()
 
             now = time.time()
             with lock:
@@ -127,16 +125,13 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
                 entry = STORE[code]
                 if now > entry["expires"]:
-                    # expired, delete it
                     del STORE[code]
                     self._send_json(410, {"error": "Code expired"})
                     return
 
                 token = entry["token"]
-                # delete code (single-use)
                 del STORE[code]
 
-            # Return token
             self._send_json(200, {"token": token})
             return
 
@@ -152,20 +147,23 @@ def clean_expired_loop():
                 del STORE[k]
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--ttl", type=int, default=300)
     args = ap.parse_args()
-    host = args.host or "0.0.0.0"
-    port = int(os.environ.get("PORT", args.port))
-    httpd = ThreadingHTTPServer((host, port), build_handler(args.ttl))
 
+    host = args.host
+    port = int(os.environ.get("PORT", args.port))
+    global TTL
     TTL = args.ttl
 
-    # Start background cleanup thread
     cleanup_thread = threading.Thread(target=clean_expired_loop, daemon=True)
     cleanup_thread.start()
 
-    print(f"device-code broker on http://{args.host}:{args.port} (TTL={args.ttl}s, in-memory)", flush=True)
+    print(f"device-code broker on http://{host}:{port} (TTL={TTL}s, in-memory)", flush=True)
 
-    server = ThreadingHTTPServer((args.host, args.port), BrokerHandler)
+    server = ThreadingHTTPServer((host, port), BrokerHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
