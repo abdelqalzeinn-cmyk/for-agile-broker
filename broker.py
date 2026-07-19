@@ -52,12 +52,17 @@ class BrokerHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
 
         auth = self.headers.get("Authorization", "")
+        origin = self.headers.get("Origin", "")
         fwd_headers = {
             "Content-Type": self.headers.get("Content-Type", "application/json"),
             "X-AgileBot-Client-Version": self.headers.get("X-AgileBot-Client-Version", "0.2.4"),
+            # Cloudflare 403s the default "Python-urllib/3.x" UA — send a browser-like one.
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         }
         if auth:
             fwd_headers["Authorization"] = auth
+        if origin:
+            fwd_headers["Origin"] = origin
 
         method = self.command
         req = urllib.request.Request(target, data=body if method in ("POST", "PUT", "DELETE") else None,
