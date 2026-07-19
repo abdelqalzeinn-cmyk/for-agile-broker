@@ -6,6 +6,8 @@ import re
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -14,8 +16,11 @@ lock = threading.Lock()
 STORE = {}  # code -> { "token": token, "expires": float_timestamp }
 TTL = 300
 
+BACKEND = "https://api.agilebot.dev"
+
+
 class BrokerHandler(BaseHTTPRequestHandler):
-    def _send_json(self, status, data):
+    def _send_json(self, status, data, extra_headers=None):
         try:
             body = json.dumps(data).encode("utf-8")
         except Exception:
@@ -26,21 +31,76 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _proxy(self):
+        # Forward to the real backend, carrying the caller's Authorization token.
+        parsed = urlparse(self.path)
+        # path looks like /proxy/<backend-path>
+        backend_path = parsed.path[len("/proxy"):] or "/"
+        target = BACKEND + backend_path
+        if parsed.query:
+            target += "?" + parsed.query
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length > 0 else b""
+
+        auth = self.headers.get("Authorization", "")
+        fwd_headers = {
+            "Content-Type": self.headers.get("Content-Type", "application/json"),
+            "X-AgileBot-Client-Version": self.headers.get("X-AgileBot-Client-Version", "0.2.4"),
+        }
+        if auth:
+            fwd_headers["Authorization"] = auth
+
+        method = self.command
+        req = urllib.request.Request(target, data=body if method in ("POST", "PUT", "DELETE") else None,
+                                      headers=fwd_headers, method=method)
+        status = 502
+        resp_body = b'{"error": "backend proxy failure"}'
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            status = resp.status
+            resp_body = resp.read()
+        except urllib.error.HTTPError as e:
+            status = e.code
+            resp_body = e.read() or b""
+        except Exception as e:
+            status = 502
+            resp_body = json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8")
+
+        self.send_response(status)
+        ct = "application/json"
+        if 'resp' in dir() and hasattr(resp, "headers"):
+            ct = resp.headers.get("Content-Type", "application/json")
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(resp_body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
+        self.end_headers()
+        self.wfile.write(resp_body)
 
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
         self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path.startswith("/proxy"):
+            self._proxy()
+            return
 
         if path == "/health":
             self._send_json(200, {"ok": True})
@@ -74,6 +134,10 @@ class BrokerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path.startswith("/proxy"):
+            self._proxy()
+            return
 
         length = int(self.headers.get("Content-Length", 0))
         body = b""
@@ -137,6 +201,14 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "Not found"})
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/proxy"):
+            self._proxy()
+            return
+        self._send_json(404, {"error": "Not found"})
+
+
 def clean_expired_loop():
     while True:
         time.sleep(30)
@@ -145,6 +217,7 @@ def clean_expired_loop():
             expired_keys = [k for k, v in STORE.items() if now > v["expires"]]
             for k in expired_keys:
                 del STORE[k]
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -161,7 +234,7 @@ def main():
     cleanup_thread = threading.Thread(target=clean_expired_loop, daemon=True)
     cleanup_thread.start()
 
-    print(f"device-code broker on http://{host}:{port} (TTL={TTL}s, in-memory)", flush=True)
+    print(f"device-code broker + backend proxy on http://{host}:{port} (TTL={TTL}s, in-memory, backend={BACKEND})", flush=True)
 
     server = ThreadingHTTPServer((host, port), BrokerHandler)
     try:
@@ -169,6 +242,7 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down broker.", flush=True)
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
