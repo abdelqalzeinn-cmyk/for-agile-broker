@@ -47,6 +47,12 @@ def _save_store(store):
 
 lock = threading.Lock()
 STORE = _load_store()  # code -> {deposit_secret, token, user_id, expires, status}
+# Conversations/messages that flow through the broker pairing tunnel. The site
+# polls /api/new-conversation + /api/pending expecting the broker to surface
+# what the plugin created; previously these returned null/empty forever, so the
+# site looped. We record proxied conversations + messages here and expose them.
+CONVERSATIONS: dict[str, dict] = {}
+PENDING_MESSAGES: list[dict] = []  # user-typed messages the site wants the plugin to run
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"^[A-Z0-9]{8}$")
@@ -110,15 +116,25 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
 
         # Local mocks for the frontend's /api/* pollers that do NOT exist on the
-        # real backend (api.agilebot.dev has NO /api prefix). These are non-critical
-        # frontend pollers (pending-tool check, new-conversation check, heartbeat).
+        # real backend (api.agilebot.dev has NO /api prefix). These are the
+        # pairing-tunnel state endpoints the site polls to surface conversations
+        # and user-typed messages that flow through this broker.
         if path.startswith("/api/"):
             clean = path.rstrip("/")
             if clean == "/api/pending":
-                self._send_json(200, {"pending": [], "tool_requests": []})
+                with lock:
+                    items = list(PENDING_MESSAGES)
+                    PENDING_MESSAGES.clear()
+                self._send_json(200, {"ok": True, "messages": [{"id": i["id"], "text": i["text"]} for i in items]})
                 return
             if clean == "/api/new-conversation":
-                self._send_json(200, {"id": None, "created": False})
+                with lock:
+                    items = [c for c in CONVERSATIONS.values() if not c.get("surfaced")]
+                    for c in items:
+                        c["surfaced"] = True
+                reqs = [{"id": c["id"], "model": c.get("model")} for c in items]
+                # also surface any conversation created via /proxy/conversations
+                self._send_json(200, {"ok": True, "requests": reqs})
                 return
             if clean == "/api/heartbeat":
                 self._send_json(200, {"ok": True})
@@ -173,6 +189,25 @@ class BrokerHandler(BaseHTTPRequestHandler):
             data = json.loads(body.decode("utf-8")) if body else {}
         except Exception:
             self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        # /api/* state endpoints the site POSTs to (heartbeat, etc.)
+        if path.startswith("/api/"):
+            if path.rstrip("/") == "/api/heartbeat":
+                self._send_json(200, {"ok": True})
+                return
+            self._send_json(200, {"ok": True})
+
+        # Site pushes a user-typed message into the pairing tunnel; the plugin
+        # polls GET /api/pending to pick it up and run it.
+        if path == "/api/pending":
+            text = data.get("text") or data.get("message") or ""
+            if not isinstance(text, str) or not text:
+                self._send_json(400, {"error": "text required"})
+                return
+            with lock:
+                PENDING_MESSAGES.append({"id": secrets.token_hex(4), "text": text})
+            self._send_json(200, {"ok": True})
             return
 
         # mint: plugin gets a code + deposit_secret
@@ -300,6 +335,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         # proxy: forward to backend
         if path.startswith("/proxy"):
+            import sys as _sys
+            print(f"[dbg] POST proxy start target={BACKEND.rstrip('/') + (path[len('/proxy'):] or '/')}", flush=True)
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             if qs:
@@ -328,6 +365,23 @@ class BrokerHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 status = 502
                 resp_body = json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8")
+            # Record conversations/messages that flow through the pairing tunnel
+            # so the site's /api/new-conversation + /api/pending can surface them
+            # (otherwise the site polls forever and never renders).
+            if status == 200 and proxy_path == "/conversations" and method == "POST":
+                try:
+                    j = json.loads(resp_body.decode("utf-8"))
+                    cid = j.get("id") or j.get("conversation_id")
+                    if cid:
+                        with lock:
+                            CONVERSATIONS[cid] = {
+                                "id": cid,
+                                "model": (data.get("model") if isinstance(data, dict) else None),
+                                "surfaced": False,
+                                "created_at": time.time(),
+                            }
+                except Exception:
+                    pass
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_body)))
