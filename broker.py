@@ -190,7 +190,10 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"code": code, "deposit_secret": dep, "ttl": TTL})
             return
 
-        # deposit: plugin stores its API token, bound to account id
+        # deposit: plugin stores its API token, bound to account id.
+        # Two protocol variants are accepted:
+        #   (A) hardened: {code, deposit_secret, token} (deposit_secret from /device-code/mint)
+        #   (B) simplified mod: {code, token} only -> auto-mint the code here
         if path == "/device-code":
             code = (data.get("code") or "").upper()
             dep = data.get("deposit_secret")
@@ -198,9 +201,28 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if not CODE_RE.match(code):
                 self._send_json(400, {"error": "Invalid code"})
                 return
-            if not isinstance(dep, str) or not dep or not isinstance(token, str) or not token:
-                self._send_json(400, {"error": "deposit_secret and token required"})
+            if not isinstance(token, str) or not token:
+                self._send_json(400, {"error": "token required"})
                 return
+            # Variant B: no deposit_secret -> auto-mint (simplified mod flow)
+            if not (isinstance(dep, str) and dep):
+                st, uid = _backend_me(token)
+                if st != 200 or not uid:
+                    self._send_json(401, {"error": "token rejected by backend"})
+                    return
+                with lock:
+                    STORE[code] = {
+                        "deposit_secret": secrets.token_hex(16),
+                        "token": token,
+                        "user_id": uid,
+                        "expires": time.time() + TTL,
+                        "status": "deposited",
+                    }
+                    _save_store(STORE)
+                print(f"[broker] auto-deposited token for code {code} (acct {uid})", flush=True)
+                self._send_json(200, {"ok": True, "ttl": TTL})
+                return
+            # Variant A: hardened mint+deposit
             with lock:
                 entry = STORE.get(code)
                 if not entry or entry["status"] != "minted":
@@ -220,6 +242,29 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 _save_store(STORE)
             print(f"[broker] deposited token for code {code} (acct {uid})", flush=True)
             self._send_json(200, {"ok": True, "ttl": TTL})
+            return
+
+        # status: simplified mod poll (returns the live state of a code)
+        if path == "/device-code/status":
+            code = (data.get("code") or "").upper()
+            if not CODE_RE.match(code):
+                self._send_json(400, {"error": "Invalid code"})
+                return
+            now = time.time()
+            with lock:
+                entry = STORE.get(code)
+                if not entry:
+                    self._send_json(404, {"status": "not_found", "found": False})
+                    return
+                if now > entry["expires"]:
+                    del STORE[code]
+                    _save_store(STORE)
+                    self._send_json(410, {"status": "expired", "found": False, "expired": True})
+                    return
+                if entry["status"] == "deposited":
+                    self._send_json(200, {"status": "paired", "found": True, "paired": True})
+                    return
+                self._send_json(200, {"status": "pending", "found": True, "paired": False})
             return
 
         # exchange: site redeems by code alone (the plugin already deposited
