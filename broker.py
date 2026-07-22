@@ -19,8 +19,33 @@ from urllib.parse import urlparse, parse_qs
 BACKEND = os.environ.get("BACKEND", "https://api.agilebot.dev")
 TTL = int(os.environ.get("BROKER_TTL", "300"))
 
+# Durable store: survives cold starts / redeploys. Point BROKER_STORE at a
+# persistent disk (e.g. Render's /data) so multiple instances share it too.
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_STORE = "/data/broker_store.json" if os.path.isdir("/data") else os.path.join(HERE, "broker_store.json")
+STORE_FILE = os.environ.get("BROKER_STORE", DEFAULT_STORE)
+
+
+def _load_store():
+    try:
+        with open(STORE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_store(store):
+    tmp = STORE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(store, f)
+        os.replace(tmp, STORE_FILE)
+    except Exception:
+        pass
+
+
 lock = threading.Lock()
-STORE = {}  # code -> {deposit_secret, token, user_id, expires, status}
+STORE = _load_store()  # code -> {deposit_secret, token, user_id, expires, status}
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"^[A-Z0-9]{8}$")
@@ -161,6 +186,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                     "expires": time.time() + TTL,
                     "status": "minted",
                 }
+                _save_store(STORE)
             self._send_json(200, {"code": code, "deposit_secret": dep, "ttl": TTL})
             return
 
@@ -191,6 +217,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 entry["token"] = token
                 entry["user_id"] = uid
                 entry["status"] = "deposited"
+                _save_store(STORE)
             print(f"[broker] deposited token for code {code} (acct {uid})", flush=True)
             self._send_json(200, {"ok": True, "ttl": TTL})
             return
@@ -210,6 +237,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 entry = STORE[code]
                 if now > entry["expires"]:
                     del STORE[code]
+                    _save_store(STORE)
                     self._send_json(410, {"error": "Code expired"})
                     return
                 if entry["status"] != "deposited":
@@ -220,6 +248,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             print(f"[broker] exchanged token for code {code} (acct {dep_uid})", flush=True)
             with lock:
                 del STORE[code]
+                _save_store(STORE)
             self._send_json(200, {"token": token})
             return
 
@@ -272,8 +301,10 @@ def clean_expired_loop():
         now = time.time()
         with lock:
             expired = [k for k, v in STORE.items() if now > v["expires"]]
-            for k in expired:
-                del STORE[k]
+            if expired:
+                for k in expired:
+                    del STORE[k]
+                _save_store(STORE)
 
 
 def main():
