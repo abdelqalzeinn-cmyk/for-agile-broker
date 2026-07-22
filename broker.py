@@ -196,8 +196,8 @@ def clean_expired_loop():
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "9000")))
     args = ap.parse_args()
 
     threading.Thread(target=clean_expired_loop, daemon=True).start()
