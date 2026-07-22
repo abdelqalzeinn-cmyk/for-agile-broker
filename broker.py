@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple AgileBot Device-Code Broker
-==================================
-Minimal broker for local pairing. No auth, no CORS restrictions.
-Just mint -> deposit -> exchange.
+Simple AgileBot Device-Code Broker (FIXED)
+=========================================
+Fix: do_POST /proxy branch no longer re-reads self.rfile (the stream is
+exhausted after the first read, so the 2nd read returned b"" and the
+upstream POST got an empty body -> 422 "Field required").
 """
 import json
 import os
@@ -20,8 +21,6 @@ from urllib.parse import urlparse, parse_qs
 BACKEND = os.environ.get("BACKEND", "https://api.agilebot.dev")
 TTL = int(os.environ.get("BROKER_TTL", "300"))
 
-# Durable store: survives cold starts / redeploys. Point BROKER_STORE at a
-# persistent disk (e.g. Render's /data) so multiple instances share it too.
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STORE = "/data/broker_store.json" if os.path.isdir("/data") else os.path.join(HERE, "broker_store.json")
 STORE_FILE = os.environ.get("BROKER_STORE", DEFAULT_STORE)
@@ -46,13 +45,9 @@ def _save_store(store):
 
 
 lock = threading.Lock()
-STORE = _load_store()  # code -> {deposit_secret, token, user_id, expires, status}
-# Conversations/messages that flow through the broker pairing tunnel. The site
-# polls /api/new-conversation + /api/pending expecting the broker to surface
-# what the plugin created; previously these returned null/empty forever, so the
-# site looped. We record proxied conversations + messages here and expose them.
+STORE = _load_store()
 CONVERSATIONS: dict[str, dict] = {}
-PENDING_MESSAGES: list[dict] = []  # user-typed messages the site wants the plugin to run
+PENDING_MESSAGES: list[dict] = []
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"^[A-Z0-9]{8}$")
@@ -62,25 +57,6 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 def _gen_code():
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
-
-
-def _backend_me(token):
-    if not token:
-        return (401, None)
-    target = BACKEND.rstrip("/") + "/me"
-    req = urllib.request.Request(target, headers={
-        "Authorization": "Bearer " + token,
-        "User-Agent": UA,
-    }, method="GET")
-    try:
-        resp = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(resp.read().decode("utf-8"))
-        uid = data.get("id") or data.get("user_id") or data.get("sub")
-        return (resp.status, uid)
-    except urllib.error.HTTPError as e:
-        return (e.code, None)
-    except Exception:
-        return (502, None)
 
 
 def proxy_path_log(target: str) -> str:
@@ -100,13 +76,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _proxy_http(self, target: str, method: str, body: bytes, fwd: dict) -> tuple:
-        """Forward one request to BACKEND using http.client (NOT urllib).
-
-        urllib.request.urlopen called from inside a ThreadingHTTPServer
-        handler thread on Windows deadlocks/hangs (~10-30s) so every POST
-        (conversation create, message send) silently times out and the client
-        sees nothing. http.client does a direct socket round-trip and returns.
-        """
         from urllib.parse import urlparse as _up
         import http.client as _hc
         pu = _up(target)
@@ -151,10 +120,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"service": "AgileBot Broker", "endpoints": ["/health", "/device-code/mint", "/device-code", "/device-code/exchange"]})
             return
 
-        # Local mocks for the frontend's /api/* pollers that do NOT exist on the
-        # real backend (api.agilebot.dev has NO /api prefix). These are the
-        # pairing-tunnel state endpoints the site polls to surface conversations
-        # and user-typed messages that flow through this broker.
         if path.startswith("/api/"):
             clean = path.rstrip("/")
             if clean == "/api/pending":
@@ -169,16 +134,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
                     for c in items:
                         c["surfaced"] = True
                 reqs = [{"id": c["id"], "model": c.get("model")} for c in items]
-                # also surface any conversation created via /proxy/conversations
                 self._send_json(200, {"ok": True, "requests": reqs})
                 return
             if clean == "/api/heartbeat":
                 self._send_json(200, {"ok": True})
                 return
-            # unknown /api route -> fall through to backend proxy below
 
-        # proxy: forward to backend (uses http.client to avoid urllib
-        # thread-deadlock when the handler makes the outbound call)
         if path.startswith("/proxy"):
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
@@ -193,6 +154,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if auth:
                 fwd["Authorization"] = auth
             method = self.command
+            # GET has no body; read once only (do not re-read rfile).
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length > 0 else b""
             status, resp_body = self._proxy_http(target, method, body, fwd)
@@ -220,15 +182,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        # /api/* state endpoints the site POSTs to (heartbeat, etc.)
         if path.startswith("/api/"):
             if path.rstrip("/") == "/api/heartbeat":
                 self._send_json(200, {"ok": True})
                 return
             self._send_json(200, {"ok": True})
 
-        # Site pushes a user-typed message into the pairing tunnel; the plugin
-        # polls GET /api/pending to pick it up and run it.
         if path == "/api/pending":
             text = data.get("text") or data.get("message") or ""
             if not isinstance(text, str) or not text:
@@ -239,7 +198,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True})
             return
 
-        # mint: plugin gets a code + deposit_secret
         if path == "/device-code/mint":
             code = _gen_code()
             dep = secrets.token_hex(16)
@@ -255,10 +213,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"code": code, "deposit_secret": dep, "ttl": TTL})
             return
 
-        # deposit: plugin stores its API token, bound to account id.
-        # Two protocol variants are accepted:
-        #   (A) hardened: {code, deposit_secret, token} (deposit_secret from /device-code/mint)
-        #   (B) simplified mod: {code, token} only -> auto-mint the code here
         if path == "/device-code":
             code = (data.get("code") or "").upper()
             dep = data.get("deposit_secret")
@@ -269,14 +223,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if not isinstance(token, str) or not token:
                 self._send_json(400, {"error": "token required"})
                 return
-            # Local broker: trust the token locally. We deliberately do NOT call
-            # the real backend's /me here — the plugin/mod sends a LOCAL token
-            # (from plugin:GetSetting), not valid prod creds, so a prod /me check
-            # would always 401 and break pairing ("backend rejected token?").
-            # Instead we derive a stable virtual user_id from the token so the
-            # rest of the flow (exchange -> token bound to code) works offline.
             uid = "local_" + uuid.uuid5(uuid.NAMESPACE_DNS, token).hex[:16]
-            # Variant B: no deposit_secret -> auto-mint (simplified mod flow)
             if not (isinstance(dep, str) and dep):
                 with lock:
                     STORE[code] = {
@@ -290,7 +237,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 print(f"[broker] auto-deposited token for code {code} (local acct {uid})", flush=True)
                 self._send_json(200, {"ok": True, "ttl": TTL})
                 return
-            # Variant A: hardened mint+deposit
             with lock:
                 entry = STORE.get(code)
                 if not entry or entry["status"] != "minted":
@@ -307,9 +253,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "ttl": TTL})
             return
 
-        # status: simplified mod poll (returns the live state of a code)
         if path == "/device-code/status":
-            # The mod sends the code as a query param (?code=XYZ); accept body or query.
             qs_params = parse_qs(qs)
             code = (data.get("code") or (qs_params.get("code", [""])[0] if qs_params.get("code") else "")).upper()
             if not CODE_RE.match(code):
@@ -332,8 +276,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "pending", "found": True, "paired": False})
             return
 
-        # exchange: site redeems by code alone (the plugin already deposited
-        # its token bound to this code). No site Authorization required.
         if path == "/device-code/exchange":
             code = (data.get("code") or "").upper()
             if not CODE_RE.match(code):
@@ -362,15 +304,14 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"token": token})
             return
 
-        # proxy: forward to backend (uses http.client to avoid urllib
-        # thread-deadlock when the handler makes the outbound call)
         if path.startswith("/proxy"):
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             if qs:
                 target += "?" + qs
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length > 0 else b""
+            # body was ALREADY read once at the top of do_POST into `body`.
+            # Do NOT call self.rfile.read() again here - the stream is exhausted
+            # and a second read returns b"" -> empty body -> upstream 422.
             auth = self.headers.get("Authorization", "")
             fwd = {
                 "Content-Type": self.headers.get("Content-Type", "application/json"),
@@ -380,12 +321,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if auth:
                 fwd["Authorization"] = auth
             method = self.command
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length > 0 else b""
-            # Strip the debug print used during diagnosis
-            # Record conversations/messages that flow through the pairing tunnel
-            # so the site's /api/new-conversation + /api/pending can surface them
-            # (otherwise the site polls forever and never renders).
             status, resp_body = self._proxy_http(target, method, body, fwd)
             if status == 200 and proxy_path == "/conversations" and method == "POST":
                 try:
