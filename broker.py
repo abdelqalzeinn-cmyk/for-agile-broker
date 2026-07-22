@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -204,12 +205,15 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if not isinstance(token, str) or not token:
                 self._send_json(400, {"error": "token required"})
                 return
+            # Local broker: trust the token locally. We deliberately do NOT call
+            # the real backend's /me here — the plugin/mod sends a LOCAL token
+            # (from plugin:GetSetting), not valid prod creds, so a prod /me check
+            # would always 401 and break pairing ("backend rejected token?").
+            # Instead we derive a stable virtual user_id from the token so the
+            # rest of the flow (exchange -> token bound to code) works offline.
+            uid = "local_" + uuid.uuid5(uuid.NAMESPACE_DNS, token).hex[:16]
             # Variant B: no deposit_secret -> auto-mint (simplified mod flow)
             if not (isinstance(dep, str) and dep):
-                st, uid = _backend_me(token)
-                if st != 200 or not uid:
-                    self._send_json(401, {"error": "token rejected by backend"})
-                    return
                 with lock:
                     STORE[code] = {
                         "deposit_secret": secrets.token_hex(16),
@@ -219,7 +223,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                         "status": "deposited",
                     }
                     _save_store(STORE)
-                print(f"[broker] auto-deposited token for code {code} (acct {uid})", flush=True)
+                print(f"[broker] auto-deposited token for code {code} (local acct {uid})", flush=True)
                 self._send_json(200, {"ok": True, "ttl": TTL})
                 return
             # Variant A: hardened mint+deposit
@@ -231,22 +235,19 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 if not secrets.compare_digest(dep, entry["deposit_secret"]):
                     self._send_json(403, {"error": "bad deposit_secret"})
                     return
-            st, uid = _backend_me(token)
-            if st != 200 or not uid:
-                self._send_json(401, {"error": "token rejected by backend"})
-                return
-            with lock:
                 entry["token"] = token
                 entry["user_id"] = uid
                 entry["status"] = "deposited"
                 _save_store(STORE)
-            print(f"[broker] deposited token for code {code} (acct {uid})", flush=True)
+            print(f"[broker] deposited token for code {code} (local acct {uid})", flush=True)
             self._send_json(200, {"ok": True, "ttl": TTL})
             return
 
         # status: simplified mod poll (returns the live state of a code)
         if path == "/device-code/status":
-            code = (data.get("code") or "").upper()
+            # The mod sends the code as a query param (?code=XYZ); accept body or query.
+            qs_params = parse_qs(qs)
+            code = (data.get("code") or (qs_params.get("code", [""])[0] if qs_params.get("code") else "")).upper()
             if not CODE_RE.match(code):
                 self._send_json(400, {"error": "Invalid code"})
                 return
