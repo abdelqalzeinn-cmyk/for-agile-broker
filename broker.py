@@ -2,7 +2,7 @@
 """
 Simple AgileBot Device-Code Broker
 ==================================
-Minimal broker for local pairing. No auth, no CORS restrictions.
+Minimal broker for local pairing No auth, no CORS restrictions.
 Just mint -> deposit -> exchange.
 """
 import json
