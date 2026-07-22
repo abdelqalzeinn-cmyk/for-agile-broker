@@ -71,7 +71,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parsed.query
 
         if path == "/health":
             self._send_json(200, {"ok": True})
@@ -101,6 +103,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
         if path.startswith("/proxy"):
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
+            if qs:
+                target += "?" + qs
             auth = self.headers.get("Authorization", "")
             fwd = {
                 "Content-Type": self.headers.get("Content-Type", "application/json"),
@@ -134,7 +138,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parsed.query
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length > 0 else b""
         try:
@@ -234,6 +240,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
         if path.startswith("/proxy"):
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
+            if qs:
+                target += "?" + qs
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length > 0 else b""
             auth = self.headers.get("Authorization", "")
