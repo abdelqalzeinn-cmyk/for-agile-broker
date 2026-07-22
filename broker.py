@@ -2,7 +2,7 @@
 """
 Simple AgileBot Device-Code Broker
 ==================================
-Minimal broker for local pairing No auth, no CORS restrictions.
+Minimal broker for local pairing. No auth, no CORS restrictions.
 Just mint -> deposit -> exchange.
 """
 import json
@@ -83,7 +83,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         # proxy: forward to backend
         if path.startswith("/proxy") or path.startswith("/api/"):
-            proxy_path = path[len("/proxy"):] if path.startswith("/proxy") else path
+            if path.startswith("/proxy"):
+                proxy_path = path[len("/proxy"):] or "/"
+            elif path.startswith("/api/"):
+                proxy_path = path[len("/api"):] or "/"
+            else:
+                proxy_path = path
             target = BACKEND.rstrip("/") + proxy_path
             auth = self.headers.get("Authorization", "")
             fwd = {
@@ -216,7 +221,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         # proxy: forward to backend
         if path.startswith("/proxy") or path.startswith("/api/"):
-            proxy_path = path[len("/proxy"):] if path.startswith("/proxy") else path
+            if path.startswith("/proxy"):
+                proxy_path = path[len("/proxy"):] or "/"
+            elif path.startswith("/api/"):
+                proxy_path = path[len("/api"):] or "/"
+            else:
+                proxy_path = path
             target = BACKEND.rstrip("/") + proxy_path
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length > 0 else b""
