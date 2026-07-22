@@ -82,8 +82,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
 
         # proxy: forward to backend
-        if path.startswith("/proxy"):
-            proxy_path = path[len("/proxy"):] or "/"
+        if path.startswith("/proxy") or path.startswith("/api/"):
+            proxy_path = path[len("/proxy"):] if path.startswith("/proxy") else path
             target = BACKEND.rstrip("/") + proxy_path
             auth = self.headers.get("Authorization", "")
             fwd = {
@@ -215,8 +215,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
 
         # proxy: forward to backend
-        if path.startswith("/proxy"):
-            proxy_path = path[len("/proxy"):] or "/"
+        if path.startswith("/proxy") or path.startswith("/api/"):
+            proxy_path = path[len("/proxy"):] if path.startswith("/proxy") else path
             target = BACKEND.rstrip("/") + proxy_path
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length > 0 else b""
