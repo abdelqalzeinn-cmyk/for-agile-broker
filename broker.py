@@ -195,19 +195,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "ttl": TTL})
             return
 
-        # exchange: site redeems, only for the SAME account
+        # exchange: site redeems by code alone (the plugin already deposited
+        # its token bound to this code). No site Authorization required.
         if path == "/device-code/exchange":
             code = (data.get("code") or "").upper()
             if not CODE_RE.match(code):
                 self._send_json(400, {"error": "Invalid code"})
-                return
-            site_auth = self.headers.get("Authorization", "")
-            if site_auth.startswith("Bearer "):
-                site_token = site_auth[7:]
-            else:
-                site_token = site_auth
-            if not site_token:
-                self._send_json(401, {"error": "site Authorization required"})
                 return
             now = time.time()
             with lock:
@@ -222,15 +215,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 if entry["status"] != "deposited":
                     self._send_json(409, {"error": "code not yet deposited"})
                     return
-                dep_uid = entry["user_id"]
                 token = entry["token"]
-            st, site_uid = _backend_me(site_token)
-            if st != 200 or not site_uid:
-                self._send_json(401, {"error": "site token rejected by backend"})
-                return
-            if site_uid != dep_uid:
-                self._send_json(403, {"error": "account mismatch"})
-                return
+                dep_uid = entry["user_id"]
+            print(f"[broker] exchanged token for code {code} (acct {dep_uid})", flush=True)
             with lock:
                 del STORE[code]
             self._send_json(200, {"token": token})
