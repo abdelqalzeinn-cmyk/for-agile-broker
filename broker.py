@@ -81,6 +81,40 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"service": "AgileBot Broker", "endpoints": ["/health", "/device-code/mint", "/device-code", "/device-code/exchange"]})
             return
 
+        # proxy: forward to backend
+        if path.startswith("/proxy"):
+            proxy_path = path[len("/proxy"):] or "/"
+            target = BACKEND.rstrip("/") + proxy_path
+            auth = self.headers.get("Authorization", "")
+            fwd = {
+                "Content-Type": self.headers.get("Content-Type", "application/json"),
+                "X-AgileBot-Client-Version": self.headers.get("X-AgileBot-Client-Version", "0.2.4"),
+                "User-Agent": UA,
+            }
+            if auth:
+                fwd["Authorization"] = auth
+            req = urllib.request.Request(target, headers=fwd, method="GET")
+            status, resp_body = 502, b'{"error": "backend proxy failure"}'
+            try:
+                resp = urllib.request.urlopen(req, timeout=30)
+                status = resp.status
+                resp_body = resp.read()
+            except urllib.error.HTTPError as e:
+                status = e.code
+                resp_body = e.read() or b""
+            except Exception as e:
+                status = 502
+                resp_body = json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
+            self.end_headers()
+            self.wfile.write(resp_body)
+            return
+
         self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
