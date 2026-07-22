@@ -85,8 +85,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
         if path.startswith("/proxy") or path.startswith("/api/"):
             if path.startswith("/proxy"):
                 proxy_path = path[len("/proxy"):] or "/"
-            elif path.startswith("/api/"):
-                proxy_path = path[len("/api"):] or "/"
             else:
                 proxy_path = path
             target = BACKEND.rstrip("/") + proxy_path
@@ -223,8 +221,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
         if path.startswith("/proxy") or path.startswith("/api/"):
             if path.startswith("/proxy"):
                 proxy_path = path[len("/proxy"):] or "/"
-            elif path.startswith("/api/"):
-                proxy_path = path[len("/api"):] or "/"
             else:
                 proxy_path = path
             target = BACKEND.rstrip("/") + proxy_path
