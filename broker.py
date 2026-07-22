@@ -83,6 +83,10 @@ def _backend_me(token):
         return (502, None)
 
 
+def proxy_path_log(target: str) -> str:
+    return target.split("://", 1)[-1]
+
+
 class BrokerHandler(BaseHTTPRequestHandler):
     def _send_json(self, status, data):
         body = json.dumps(data).encode("utf-8")
@@ -94,6 +98,38 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
         self.end_headers()
         self.wfile.write(body)
+
+    def _proxy_http(self, target: str, method: str, body: bytes, fwd: dict) -> tuple:
+        """Forward one request to BACKEND using http.client (NOT urllib).
+
+        urllib.request.urlopen called from inside a ThreadingHTTPServer
+        handler thread on Windows deadlocks/hangs (~10-30s) so every POST
+        (conversation create, message send) silently times out and the client
+        sees nothing. http.client does a direct socket round-trip and returns.
+        """
+        from urllib.parse import urlparse as _up
+        import http.client as _hc
+        pu = _up(target)
+        host = pu.hostname or "127.0.0.1"
+        port = pu.port or (443 if pu.scheme == "https" else 80)
+        path_q = pu.path or "/"
+        if pu.query:
+            path_q += "?" + pu.query
+        try:
+            conn = _hc.HTTPSConnection(host, port, timeout=30) if pu.scheme == "https" \
+                else _hc.HTTPConnection(host, port, timeout=30)
+            conn.request(method, path_q, body=body or None, headers=fwd)
+            resp = conn.getresponse()
+            resp_body = resp.read() or b""
+            status = resp.status
+            conn.close()
+        except Exception as e:
+            return (502, json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8"))
+        snippet = resp_body.decode("utf-8", "replace")
+        if len(snippet) > 200:
+            snippet = snippet[:200] + "..."
+        print(f"[broker] {method} {proxy_path_log(target)} -> {status} | {snippet}", flush=True)
+        return (status, resp_body)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -141,7 +177,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 return
             # unknown /api route -> fall through to backend proxy below
 
-        # proxy: forward to backend
+        # proxy: forward to backend (uses http.client to avoid urllib
+        # thread-deadlock when the handler makes the outbound call)
         if path.startswith("/proxy"):
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
@@ -155,23 +192,15 @@ class BrokerHandler(BaseHTTPRequestHandler):
             }
             if auth:
                 fwd["Authorization"] = auth
-            req = urllib.request.Request(target, headers=fwd, method="GET")
-            status, resp_body = 502, b'{"error": "backend proxy failure"}'
-            try:
-                resp = urllib.request.urlopen(req, timeout=30)
-                status = resp.status
-                resp_body = resp.read()
-            except urllib.error.HTTPError as e:
-                status = e.code
-                resp_body = e.read() or b""
-            except Exception as e:
-                status = 502
-                resp_body = json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8")
+            method = self.command
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length > 0 else b""
+            status, resp_body = self._proxy_http(target, method, body, fwd)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_body)))
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
             self.end_headers()
             self.wfile.write(resp_body)
@@ -333,10 +362,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"token": token})
             return
 
-        # proxy: forward to backend
+        # proxy: forward to backend (uses http.client to avoid urllib
+        # thread-deadlock when the handler makes the outbound call)
         if path.startswith("/proxy"):
-            import sys as _sys
-            print(f"[dbg] POST proxy start target={BACKEND.rstrip('/') + (path[len('/proxy'):] or '/')}", flush=True)
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             if qs:
@@ -352,22 +380,13 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if auth:
                 fwd["Authorization"] = auth
             method = self.command
-            req = urllib.request.Request(target, data=body if method in ("POST", "PUT", "DELETE") else None,
-                                         headers=fwd, method=method)
-            status, resp_body = 502, b'{"error": "backend proxy failure"}'
-            try:
-                resp = urllib.request.urlopen(req, timeout=30)
-                status = resp.status
-                resp_body = resp.read()
-            except urllib.error.HTTPError as e:
-                status = e.code
-                resp_body = e.read() or b""
-            except Exception as e:
-                status = 502
-                resp_body = json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8")
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length > 0 else b""
+            # Strip the debug print used during diagnosis
             # Record conversations/messages that flow through the pairing tunnel
             # so the site's /api/new-conversation + /api/pending can surface them
             # (otherwise the site polls forever and never renders).
+            status, resp_body = self._proxy_http(target, method, body, fwd)
             if status == 200 and proxy_path == "/conversations" and method == "POST":
                 try:
                     j = json.loads(resp_body.decode("utf-8"))
