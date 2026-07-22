@@ -81,12 +81,25 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"service": "AgileBot Broker", "endpoints": ["/health", "/device-code/mint", "/device-code", "/device-code/exchange"]})
             return
 
+        # Local mocks for the frontend's /api/* pollers that do NOT exist on the
+        # real backend (api.agilebot.dev has NO /api prefix). These are non-critical
+        # frontend pollers (pending-tool check, new-conversation check, heartbeat).
+        if path.startswith("/api/"):
+            clean = path.rstrip("/")
+            if clean == "/api/pending":
+                self._send_json(200, {"pending": [], "tool_requests": []})
+                return
+            if clean == "/api/new-conversation":
+                self._send_json(200, {"id": None, "created": False})
+                return
+            if clean == "/api/heartbeat":
+                self._send_json(200, {"ok": True})
+                return
+            # unknown /api route -> fall through to backend proxy below
+
         # proxy: forward to backend
-        if path.startswith("/proxy") or path.startswith("/api/"):
-            if path.startswith("/proxy"):
-                proxy_path = path[len("/proxy"):] or "/"
-            else:
-                proxy_path = path
+        if path.startswith("/proxy"):
+            proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             auth = self.headers.get("Authorization", "")
             fwd = {
@@ -218,11 +231,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
 
         # proxy: forward to backend
-        if path.startswith("/proxy") or path.startswith("/api/"):
-            if path.startswith("/proxy"):
-                proxy_path = path[len("/proxy"):] or "/"
-            else:
-                proxy_path = path
+        if path.startswith("/proxy"):
+            proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length > 0 else b""
