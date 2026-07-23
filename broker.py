@@ -192,12 +192,16 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/"):
             if path.rstrip("/") == "/api/heartbeat":
-                # Heartbeat clients must send an object, but malformed/list JSON
-                # should return a normal 400 instead of crashing the request thread.
-                if not isinstance(data, dict):
-                    self._send_json(400, {"error": "heartbeat body must be an object"})
+                # Older plugin builds sent an array here. It still proves the
+                # Studio process is alive, so accept it with a connection-based
+                # fallback identity while keeping arbitrary malformed JSON safe.
+                if isinstance(data, dict):
+                    session_id = str(data.get("session_id", "")).strip()
+                elif isinstance(data, list):
+                    session_id = "legacy:" + (self.client_address[0] if self.client_address else "unknown")
+                else:
+                    self._send_json(400, {"error": "heartbeat body must be an object or legacy array"})
                     return
-                session_id = str(data.get("session_id", "")).strip()
                 if session_id:
                     LAST_HEARTBEAT[session_id] = time.time()
                 self._send_json(200, {"ok": True})
