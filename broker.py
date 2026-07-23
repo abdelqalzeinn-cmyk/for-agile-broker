@@ -48,6 +48,7 @@ lock = threading.Lock()
 STORE = _load_store()
 CONVERSATIONS: dict[str, dict] = {}
 PENDING_MESSAGES: list[dict] = []
+LAST_HEARTBEAT: dict[str, float] = {}
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"^[A-Z0-9]{8}$")
@@ -69,7 +70,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
         self.end_headers()
@@ -94,15 +97,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
             conn.close()
         except Exception as e:
             return (502, json.dumps({"error": "backend proxy failure", "detail": str(e)}).encode("utf-8"))
-        snippet = resp_body.decode("utf-8", "replace")
-        if len(snippet) > 200:
-            snippet = snippet[:200] + "..."
-        print(f"[broker] {method} {proxy_path_log(target)} -> {status} | {snippet}", flush=True)
+        print(f"[broker] {method} {proxy_path_log(target)} -> {status}", flush=True)
         return (status, resp_body)
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
         self.end_headers()
@@ -137,10 +137,16 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "requests": reqs})
                 return
             if clean == "/api/heartbeat":
-                self._send_json(200, {"ok": True})
+                session_id = parse_qs(qs).get("session_id", [""])[0]
+                now = time.time()
+                last = LAST_HEARTBEAT.get(session_id, 0) if session_id else max(LAST_HEARTBEAT.values(), default=0)
+                self._send_json(200, {"ok": True, "connected": bool(last and now - last <= 12), "age_seconds": (now - last) if last else None})
                 return
 
         if path.startswith("/proxy"):
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                self._send_json(401, {"error": "Authorization required"})
+                return
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             if qs:
@@ -161,7 +167,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
             self.end_headers()
@@ -184,6 +192,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/"):
             if path.rstrip("/") == "/api/heartbeat":
+                session_id = str(data.get("session_id", "")).strip()
+                if session_id:
+                    LAST_HEARTBEAT[session_id] = time.time()
                 self._send_json(200, {"ok": True})
                 return
             self._send_json(200, {"ok": True})
@@ -305,6 +316,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/proxy"):
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                self._send_json(401, {"error": "Authorization required"})
+                return
             proxy_path = path[len("/proxy"):] or "/"
             target = BACKEND.rstrip("/") + proxy_path
             if qs:
@@ -339,7 +353,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
             self.end_headers()
