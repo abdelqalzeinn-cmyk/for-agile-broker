@@ -192,6 +192,11 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/"):
             if path.rstrip("/") == "/api/heartbeat":
+                # Heartbeat clients must send an object, but malformed/list JSON
+                # should return a normal 400 instead of crashing the request thread.
+                if not isinstance(data, dict):
+                    self._send_json(400, {"error": "heartbeat body must be an object"})
+                    return
                 session_id = str(data.get("session_id", "")).strip()
                 if session_id:
                     LAST_HEARTBEAT[session_id] = time.time()
