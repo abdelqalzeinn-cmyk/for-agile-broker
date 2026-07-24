@@ -176,6 +176,39 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self.wfile.write(resp_body)
             return
 
+        # Local modders profile endpoint (stand-in for api.agilebot.dev/modders/me).
+        # Returns the current modder's username so the site can look up their Roblox avatar.
+        if path == "/modders/me":
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Bearer "):
+                self._send_json(401, {"error": "Authorization required"})
+                return
+            # In a real deployment the username comes from the backend session.
+            # Here we echo a fixed modder identity so the feature is demoable end-to-end.
+            self._send_json(200, {"username": "BuilderBob", "id": "local_modder_1"})
+            return
+
+        # Roblox public-data proxy (CORS-safe bridge for users.roblox.com / thumbnails.roblox.com).
+        if path.startswith("/roblox-proxy/"):
+            rp = path[len("/roblox-proxy"):]
+            target = "https://" + rp.lstrip("/")
+            if qs:
+                target += "?" + qs
+            status, resp_body = self._proxy_http(target, "GET", b"", {
+                "User-Agent": UA,
+                "Accept": "application/json",
+            })
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.end_headers()
+            self.wfile.write(resp_body)
+            return
+
         self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
@@ -367,6 +400,36 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AgileBot-Client-Version")
+            self.end_headers()
+            self.wfile.write(resp_body)
+            return
+
+        # Local modders profile endpoint (stand-in for api.agilebot.dev/modders/me).
+        if path == "/modders/me":
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Bearer "):
+                self._send_json(401, {"error": "Authorization required"})
+                return
+            self._send_json(200, {"username": "BuilderBob", "id": "local_modder_1"})
+            return
+
+        # Roblox public-data proxy (CORS-safe bridge for users.roblox.com / thumbnails.roblox.com).
+        if path.startswith("/roblox-proxy/"):
+            rp = path[len("/roblox-proxy"):]
+            target = "https://" + rp.lstrip("/")
+            if qs:
+                target += "?" + qs
+            status, resp_body = self._proxy_http(target, "GET", b"", {
+                "User-Agent": UA,
+                "Accept": "application/json",
+            })
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.send_header("Access-Control-Allow-Origin", os.environ.get("AGILEBOT_WEB_ORIGIN", "https://for-agile.onrender.com"))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             self.end_headers()
             self.wfile.write(resp_body)
             return
